@@ -1,6 +1,7 @@
 package log
 
 import (
+	"fmt"
 	api "github.com/tatsuki1112/distributed-services-with-go/api/v1"
 	"os"
 	"path"
@@ -10,14 +11,14 @@ import (
 	"sync"
 )
 
-type log struct {
+type Log struct {
 	mu sync.RWMutex
 
 	Dir    string
 	Config Config
 
 	activeSegment *segment
-	segments      []*string
+	segments      []*segment
 }
 
 func NewLog(dir string, c Config) (*Log, error) {
@@ -29,7 +30,7 @@ func NewLog(dir string, c Config) (*Log, error) {
 		c.Segment.MaxIndexBytes = 1024
 	}
 
-	l := &log{
+	l := &Log{
 		Dir:    dir,
 		Config: c,
 	}
@@ -38,7 +39,7 @@ func NewLog(dir string, c Config) (*Log, error) {
 
 }
 
-func (l *log) setup() error {
+func (l *Log) setup() error {
 	files, err := os.ReadDir(l.Dir)
 
 	if err != nil {
@@ -76,7 +77,7 @@ func (l *log) setup() error {
 	return nil
 }
 
-func (l *log) Append(record *api.Record) (uint64, error) {
+func (l *Log) Append(record *api.Record) (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -98,4 +99,94 @@ func (l *log) Append(record *api.Record) (uint64, error) {
 	}
 
 	return off, err
+}
+
+func (l *Log) Read(off uint64) (*api.Record, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var s *segment
+
+	for _, segment := range l.segments {
+		if segment.baseOffset <= off && off < segment.nextOffset {
+			s = segment
+			break
+		}
+	}
+
+	if s == nil || s.nextOffset <= off {
+		return nil, fmt.Errorf("offset out of range: %d", off)
+	}
+	return s.Read(off)
+}
+
+func (l *Log) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	for _, segment := range l.segments {
+		if err := segment.Close(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (l *Log) Remove() error {
+	if err := l.Close(); err != nil {
+		return err
+	}
+
+	return os.RemoveAll(l.Dir)
+}
+
+func (l *Log) Reset() error {
+	if err := l.Remove(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (l *Log) LowestOffset() (uint64, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	return l.segments[0].baseOffset, nil
+}
+
+func (l *Log) HighestOffset() (uint64, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	return l.HighestOffset()
+}
+
+func (l *Log) highestOffset() (uint64, error) {
+	off := l.segments[len(l.segments)-1].nextOffset
+	if off == 0 {
+		return 0, nil
+	}
+
+	return off - 1, nil
+}
+
+func (l *Log) Truncate(lowest uint64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var segments []*segment
+
+	for _, s := range l.segments {
+		if s.nextOffset <= lowest+1 {
+			if err := s.Remove(); err != nil {
+				return err
+			}
+			continue
+		}
+		segments = append(segments, s)
+	}
+	l.segments = segments
+	return nil
 }
