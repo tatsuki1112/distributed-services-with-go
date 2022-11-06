@@ -3,6 +3,7 @@ package log
 import (
 	"fmt"
 	api "github.com/tatsuki1112/distributed-services-with-go/api/v1"
+	"io"
 	"os"
 	"path"
 	"sort"
@@ -69,8 +70,7 @@ func (l *Log) setup() error {
 	}
 
 	if l.segments == nil {
-		if err = l.newSegment(l.Config.Segment.InitialOffset,
-		); err != nil {
+		if err = l.newSegment(l.Config.Segment.InitialOffset); err != nil {
 			return err
 		}
 	}
@@ -160,7 +160,7 @@ func (l *Log) HighestOffset() (uint64, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	return l.HighestOffset()
+	return l.highestOffset()
 }
 
 func (l *Log) highestOffset() (uint64, error) {
@@ -188,5 +188,40 @@ func (l *Log) Truncate(lowest uint64) error {
 		segments = append(segments, s)
 	}
 	l.segments = segments
+	return nil
+}
+
+func (l *Log) Reader() io.Reader {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	readers := make([]io.Reader, len(l.segments))
+
+	for i, segment := range l.segments {
+		readers[i] = &originReader{segment.store, 0}
+	}
+	return io.MultiReader(readers...)
+}
+
+type originReader struct {
+	*store
+	off int64
+}
+
+func (o *originReader) Read(p []byte) (int, error) {
+	n, err := o.ReadAt(p, o.off)
+	o.off += int64(n)
+
+	return n, err
+}
+
+func (l *Log) newSegment(off uint64) error {
+	s, err := newSegment(l.Dir, off, l.Config)
+	if err != nil {
+		return err
+	}
+
+	l.segments = append(l.segments, s)
+	l.activeSegment = s
 	return nil
 }
